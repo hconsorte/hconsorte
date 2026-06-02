@@ -1,8 +1,8 @@
 - 👋 Hi, I’m @hconsorte
 - 👀 I’m interested in ...
-- 🌱 I’m currently learning Python
+- 🌱 I’m currently learning Python / IA
 - 💞️ I’m looking to learn and create some projects to help me and my colleagues in our company activities.
-- 📫 How to reach me
+- 📫 How to reach me: hconsorte@gmail.com
 - 😄 Pronouns: He/Him
 - ⚡ Fun fact: 
 
