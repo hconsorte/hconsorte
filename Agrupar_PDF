@@ -1,0 +1,445 @@
+import csv
+import re
+from datetime import datetime
+from pathlib import Path
+
+from pypdf import PdfReader, PdfWriter
+from pypdf.errors import PdfReadError
+
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+PASTA_NFS = Path(r"C:\GOOGLE")
+PASTA_CCES = PASTA_NFS / "CCe"
+PASTA_SAIDA = PASTA_NFS / "Agrupados"
+
+ARQUIVO_RELATORIO = PASTA_SAIDA / "Relatorio_Agrupamento.csv"
+
+# Se True, substitui um PDF já existente na pasta de saída.
+# Se False, o arquivo será ignorado caso já exista.
+SUBSTITUIR_ARQUIVOS_EXISTENTES = True
+
+
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
+
+def extrair_numero_nf(nome_arquivo: str) -> str | None:
+    """
+    Extrai o número da NF localizado após 'INV.'.
+
+    Exemplo:
+    Progress 1 - INV. 12982 - GOOGLE BRASIL.pdf
+    Retorno: 12982
+    """
+    correspondencia = re.search(
+        r"\bINV\.\s*(\d+)\b",
+        nome_arquivo,
+        flags=re.IGNORECASE,
+    )
+
+    if correspondencia:
+        return correspondencia.group(1)
+
+    return None
+
+
+def extrair_numero_cce(nome_arquivo: str) -> str | None:
+    """
+    Extrai o número da NF do nome da Carta de Correção.
+
+    Padrão esperado:
+    CCe 12982.pdf
+    """
+    correspondencia = re.fullmatch(
+        r"CCe\s+(\d+)",
+        Path(nome_arquivo).stem.strip(),
+        flags=re.IGNORECASE,
+    )
+
+    if correspondencia:
+        return correspondencia.group(1)
+
+    return None
+
+
+def gerar_nome_saida(nome_nf: str) -> str:
+    """
+    Mantém o nome original da NF e acrescenta '+ CCe'
+    imediatamente depois do número da NF.
+
+    Exemplo:
+    Progress 1 - INV. 12982 - GOOGLE BRASIL.pdf
+
+    Resultado:
+    Progress 1 - INV. 12982 + CCe - GOOGLE BRASIL.pdf
+    """
+    return re.sub(
+        r"(\bINV\.\s*\d+\b)",
+        r"\1 + CCe",
+        nome_nf,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+
+def adicionar_pdf(writer: PdfWriter, caminho_pdf: Path) -> int:
+    """
+    Adiciona todas as páginas de um PDF ao PdfWriter.
+
+    Retorna a quantidade de páginas adicionadas.
+    """
+    reader = PdfReader(caminho_pdf)
+
+    if reader.is_encrypted:
+        try:
+            reader.decrypt("")
+        except Exception as erro:
+            raise ValueError(
+                f"O PDF está protegido por senha: {caminho_pdf.name}"
+            ) from erro
+
+    quantidade_paginas = len(reader.pages)
+
+    for pagina in reader.pages:
+        writer.add_page(pagina)
+
+    return quantidade_paginas
+
+
+def localizar_cce_por_numero(
+    numero_nf: str,
+    mapa_cces: dict[str, list[Path]],
+) -> tuple[Path | None, str | None]:
+    """
+    Localiza a CCe correspondente ao número da NF.
+
+    Retorna:
+    - caminho da CCe, quando encontrada;
+    - observação sobre duplicidade, quando aplicável.
+    """
+    arquivos_encontrados = mapa_cces.get(numero_nf, [])
+
+    if not arquivos_encontrados:
+        return None, None
+
+    if len(arquivos_encontrados) > 1:
+        nomes = "; ".join(arquivo.name for arquivo in arquivos_encontrados)
+
+        return (
+            arquivos_encontrados[0],
+            f"Mais de uma CCe encontrada. Utilizada: "
+            f"{arquivos_encontrados[0].name}. Encontradas: {nomes}",
+        )
+
+    return arquivos_encontrados[0], None
+
+
+def criar_mapa_cces() -> tuple[dict[str, list[Path]], list[dict]]:
+    """
+    Lê a pasta de CCes e cria um mapa no formato:
+
+    {
+        "12982": [Path("CCe 12982.pdf")],
+        "12993": [Path("CCe 12993.pdf")]
+    }
+
+    Também retorna registros de arquivos com nomes inválidos.
+    """
+    mapa_cces: dict[str, list[Path]] = {}
+    registros_invalidos: list[dict] = []
+
+    for arquivo in sorted(PASTA_CCES.glob("*.pdf")):
+        numero_nf = extrair_numero_cce(arquivo.name)
+
+        if not numero_nf:
+            registros_invalidos.append(
+                {
+                    "numero_nf": "",
+                    "arquivo_nf": "",
+                    "arquivo_cce": arquivo.name,
+                    "arquivo_saida": "",
+                    "paginas_nf": "",
+                    "paginas_cce": "",
+                    "status": "CCe com nome inválido",
+                    "observacao": (
+                        "O nome esperado é: CCe NUMERO.pdf. "
+                        f"Exemplo: CCe 12982.pdf"
+                    ),
+                }
+            )
+            continue
+
+        mapa_cces.setdefault(numero_nf, []).append(arquivo)
+
+    return mapa_cces, registros_invalidos
+
+
+def salvar_relatorio(registros: list[dict]) -> None:
+    """
+    Salva o relatório do processamento em CSV.
+    """
+    campos = [
+        "numero_nf",
+        "arquivo_nf",
+        "arquivo_cce",
+        "arquivo_saida",
+        "paginas_nf",
+        "paginas_cce",
+        "status",
+        "observacao",
+    ]
+
+    with ARQUIVO_RELATORIO.open(
+        "w",
+        newline="",
+        encoding="utf-8-sig",
+    ) as arquivo_csv:
+        escritor = csv.DictWriter(
+            arquivo_csv,
+            fieldnames=campos,
+            delimiter=";",
+        )
+
+        escritor.writeheader()
+        escritor.writerows(registros)
+
+
+# ============================================================
+# PROCESSAMENTO PRINCIPAL
+# ============================================================
+
+def agrupar_pdfs() -> None:
+    inicio = datetime.now()
+
+    print("=" * 70)
+    print("AGRUPAMENTO DE NOTAS FISCAIS E CARTAS DE CORREÇÃO")
+    print("=" * 70)
+    print(f"Pasta das NFs : {PASTA_NFS}")
+    print(f"Pasta das CCes: {PASTA_CCES}")
+    print(f"Pasta de saída: {PASTA_SAIDA}")
+    print("=" * 70)
+
+    if not PASTA_NFS.exists():
+        print(f"\nERRO: a pasta das NFs não existe: {PASTA_NFS}")
+        return
+
+    if not PASTA_CCES.exists():
+        print(f"\nERRO: a pasta das CCes não existe: {PASTA_CCES}")
+        return
+
+    PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
+
+    mapa_cces, registros = criar_mapa_cces()
+
+    numeros_cces_utilizadas: set[str] = set()
+    numeros_nfs_encontradas: set[str] = set()
+
+    total_nfs_analisadas = 0
+    total_agrupados = 0
+    total_sem_cce = 0
+    total_erros = 0
+    total_ignorados = 0
+
+    arquivos_nf = sorted(PASTA_NFS.glob("*.pdf"))
+
+    if not arquivos_nf:
+        print("\nNenhum arquivo PDF foi encontrado na pasta das NFs.")
+
+    for arquivo_nf in arquivos_nf:
+        total_nfs_analisadas += 1
+
+        numero_nf = extrair_numero_nf(arquivo_nf.name)
+
+        if not numero_nf:
+            total_ignorados += 1
+
+            registros.append(
+                {
+                    "numero_nf": "",
+                    "arquivo_nf": arquivo_nf.name,
+                    "arquivo_cce": "",
+                    "arquivo_saida": "",
+                    "paginas_nf": "",
+                    "paginas_cce": "",
+                    "status": "NF ignorada",
+                    "observacao": (
+                        "Não foi possível encontrar um número após 'INV.'."
+                    ),
+                }
+            )
+
+            print(
+                f"[IGNORADO] Número da NF não identificado: "
+                f"{arquivo_nf.name}"
+            )
+            continue
+
+        numeros_nfs_encontradas.add(numero_nf)
+
+        arquivo_cce, observacao_cce = localizar_cce_por_numero(
+            numero_nf,
+            mapa_cces,
+        )
+
+        if arquivo_cce is None:
+            total_sem_cce += 1
+
+            registros.append(
+                {
+                    "numero_nf": numero_nf,
+                    "arquivo_nf": arquivo_nf.name,
+                    "arquivo_cce": "",
+                    "arquivo_saida": "",
+                    "paginas_nf": "",
+                    "paginas_cce": "",
+                    "status": "CCe não encontrada",
+                    "observacao": (
+                        f"Arquivo esperado: CCe {numero_nf}.pdf"
+                    ),
+                }
+            )
+
+            print(
+                f"[SEM CCE] NF {numero_nf}: "
+                f"não foi encontrada a CCe correspondente."
+            )
+            continue
+
+        numeros_cces_utilizadas.add(numero_nf)
+
+        nome_saida = gerar_nome_saida(arquivo_nf.name)
+        caminho_saida = PASTA_SAIDA / nome_saida
+
+        if caminho_saida.exists() and not SUBSTITUIR_ARQUIVOS_EXISTENTES:
+            total_ignorados += 1
+
+            registros.append(
+                {
+                    "numero_nf": numero_nf,
+                    "arquivo_nf": arquivo_nf.name,
+                    "arquivo_cce": arquivo_cce.name,
+                    "arquivo_saida": caminho_saida.name,
+                    "paginas_nf": "",
+                    "paginas_cce": "",
+                    "status": "Arquivo de saída já existe",
+                    "observacao": (
+                        "O arquivo não foi substituído porque "
+                        "SUBSTITUIR_ARQUIVOS_EXISTENTES está como False."
+                    ),
+                }
+            )
+
+            print(
+                f"[IGNORADO] NF {numero_nf}: "
+                f"o arquivo de saída já existe."
+            )
+            continue
+
+        writer = PdfWriter()
+
+        try:
+            paginas_nf = adicionar_pdf(writer, arquivo_nf)
+            paginas_cce = adicionar_pdf(writer, arquivo_cce)
+
+            with caminho_saida.open("wb") as arquivo_pdf_saida:
+                writer.write(arquivo_pdf_saida)
+
+            total_agrupados += 1
+
+            observacao = observacao_cce or ""
+
+            registros.append(
+                {
+                    "numero_nf": numero_nf,
+                    "arquivo_nf": arquivo_nf.name,
+                    "arquivo_cce": arquivo_cce.name,
+                    "arquivo_saida": caminho_saida.name,
+                    "paginas_nf": paginas_nf,
+                    "paginas_cce": paginas_cce,
+                    "status": "Agrupado com sucesso",
+                    "observacao": observacao,
+                }
+            )
+
+            print(
+                f"[OK] NF {numero_nf}: criado "
+                f"{caminho_saida.name}"
+            )
+
+        except (PdfReadError, ValueError, OSError, Exception) as erro:
+            total_erros += 1
+
+            if caminho_saida.exists():
+                try:
+                    caminho_saida.unlink()
+                except OSError:
+                    pass
+
+            registros.append(
+                {
+                    "numero_nf": numero_nf,
+                    "arquivo_nf": arquivo_nf.name,
+                    "arquivo_cce": arquivo_cce.name,
+                    "arquivo_saida": caminho_saida.name,
+                    "paginas_nf": "",
+                    "paginas_cce": "",
+                    "status": "Erro no processamento",
+                    "observacao": str(erro),
+                }
+            )
+
+            print(
+                f"[ERRO] NF {numero_nf}: {erro}"
+            )
+
+        finally:
+            writer.close()
+
+    # Identifica CCes que não possuem uma NF correspondente.
+    numeros_cces_sem_nf = set(mapa_cces.keys()) - numeros_nfs_encontradas
+
+    for numero_nf in sorted(numeros_cces_sem_nf, key=int):
+        for arquivo_cce in mapa_cces[numero_nf]:
+            registros.append(
+                {
+                    "numero_nf": numero_nf,
+                    "arquivo_nf": "",
+                    "arquivo_cce": arquivo_cce.name,
+                    "arquivo_saida": "",
+                    "paginas_nf": "",
+                    "paginas_cce": "",
+                    "status": "CCe sem NF correspondente",
+                    "observacao": (
+                        "Não foi encontrada uma NF com esse número "
+                        "na pasta principal."
+                    ),
+                }
+            )
+
+    salvar_relatorio(registros)
+
+    fim = datetime.now()
+    duracao = fim - inicio
+
+    print()
+    print("=" * 70)
+    print("RESUMO DO PROCESSAMENTO")
+    print("=" * 70)
+    print(f"NFs analisadas................: {total_nfs_analisadas}")
+    print(f"PDFs agrupados com sucesso....: {total_agrupados}")
+    print(f"NFs sem CCe...................: {total_sem_cce}")
+    print(f"CCes sem NF correspondente....: {len(numeros_cces_sem_nf)}")
+    print(f"Arquivos ignorados............: {total_ignorados}")
+    print(f"Erros de processamento........: {total_erros}")
+    print(f"Duração........................: {duracao}")
+    print()
+    print(f"Relatório gerado em: {ARQUIVO_RELATORIO}")
+    print(f"PDFs gerados em....: {PASTA_SAIDA}")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    agrupar_pdfs()
