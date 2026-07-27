@@ -1,0 +1,66 @@
+SELECT
+    T0.[Serial] AS 'NF',
+    T0.[DocDate] AS 'DATA EMISSÃO',
+    T0.[NumAtCard] AS 'PROJETO',
+    T0.[CardCode] AS 'CÓD. CLIENTE',
+    T0.[CardName] AS 'CLIENTE',
+    T1.[LineNum] + 1 AS 'LINHA',
+    T1.[ItemCode] AS 'CÓD. ITEM',
+    T1.[Dscription] AS 'DESCRIÇÃO',
+
+    CAST(T1.[Quantity] AS DECIMAL(19, 4)) AS 'QUANTIDADE',
+
+    CAST(T1.[Price] AS DECIMAL(19, 6)) AS 'PREÇO UNITÁRIO',
+
+    CAST(
+        ISNULL(T1.[LineVat], 0)
+        / NULLIF(T1.[Quantity], 0)
+        AS DECIMAL(19, 6)
+    ) AS 'IPI UNITÁRIO',
+
+    CAST(
+        ISNULL(T1.[LineVat], 0)
+        AS DECIMAL(19, 2)
+    ) AS 'IPI TOTAL ITEM',
+
+    CAST(
+        T1.[LineTotal]
+        AS DECIMAL(19, 2)
+    ) AS 'TOTAL ITEM SEM IPI',
+
+    CAST(
+        T1.[LineTotal] + ISNULL(T1.[LineVat], 0)
+        AS DECIMAL(19, 2)
+    ) AS 'TOTAL ITEM COM IPI',
+
+    CAST(
+        T0.[DocTotal]
+        AS DECIMAL(19, 2)
+    ) AS 'TOTAL NF'
+
+FROM OINV T0
+
+INNER JOIN INV1 T1
+    ON T1.[DocEntry] = T0.[DocEntry]
+
+WHERE
+    T0.[CANCELED] = 'N'
+
+    AND T0.[NumAtCard] IN
+    (
+        'EE260133IM',
+        'EE260133A1',
+        'EE260133A2',
+        'EE260133A3',
+        'EE260133A4',
+        'EE260133A5',
+        'EE260133A6',
+        'EE260133A7',
+        'EE260133A9'
+    )
+
+ORDER BY
+    T0.[NumAtCard],
+    T0.[DocDate],
+    T0.[Serial],
+    T1.[LineNum];
