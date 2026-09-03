@@ -1,0 +1,113 @@
+import win32com.client
+from collections import defaultdict
+from datetime import datetime
+import pandas as pd
+import os
+import re
+
+# Retorna nome do remetente
+def get_sender_info(message):
+    try:
+        return message.SenderName or message.SenderEmailAddress or "Remetente Desconhecido"
+    except AttributeError:
+        return "Remetente Desconhecido"
+
+# Retorna data formatada
+def safe_get_received_time(message):
+    try:
+        received_time = message.ReceivedTime
+        if received_time and isinstance(received_time, datetime):
+            return received_time.strftime("%d/%m/%Y")
+    except Exception:
+        pass
+    return "Data Desconhecida"
+
+# Extrai número da NF baseado em várias expressões
+def extract_nf_number(subject):
+    padroes = [
+        r"NF\s*[-:]?\s*(\d+)",
+        r"NFS[-–]e\s*(?:No\.?|N[ºo])\s*(\d+)",
+        r"\bN[ºo]\s*(\d+)",
+        r"Nota Fiscal Eletronica de Serviço\s*(?:n[ºo]\.?\s*)?(\d+)",
+        r"NF[-–]?e\s*[:\-]?\s*(\d+)",
+        r"NFe\s*[:\-]?\s*(\d+)",
+        r"NFE\s*[:\-]?\s*(\d+)",
+        r"N\.?Doc\s*[:\-]?\s*(\d+)",
+        r"RPS\s+No\s*[-:]?\s*(\d+)"
+    ]
+    for padrao in padroes:
+        match = re.search(padrao, subject, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+# Extrai o primeiro link do corpo do e-mail (HTML ou texto)
+def extract_first_link_from_body(message):
+    try:
+        body = message.HTMLBody or message.Body or ""
+        match = re.search(r'https?://[^\s"<]+', body)
+        return match.group(0) if match else ""
+    except Exception:
+        return ""
+
+# Função para corrigir nomes de abas inválidos no Excel
+def limpar_nome_aba(nome):
+    return re.sub(r'[\\/*?:\[\]]', '-', nome)[:31]
+
+# Analisa os e-mails e agrupa por categoria
+def analyze_outlook_emails():
+    outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+    inbox = outlook.GetDefaultFolder(6)  # Caixa de Entrada
+    messages = inbox.Items
+
+    categorias_emails = defaultdict(list)
+
+    for message in messages:
+        try:
+            if message.Class != 43:
+                continue
+
+            categoria = message.Categories or "Sem Categoria"
+
+            subject = message.Subject or "Sem Assunto"
+            sender = get_sender_info(message)
+            received_date = safe_get_received_time(message)
+            nf_number = extract_nf_number(subject)
+            link = extract_first_link_from_body(message)
+
+            categorias_emails[categoria].append({
+                "Data": received_date,
+                "Remetente": sender,
+                "Assunto": subject,
+                "Número NF": nf_number,
+                "Link no Corpo": link
+            })
+
+        except Exception as e:
+            print(f"Erro ao processar um e-mail: {str(e)}")
+
+    return categorias_emails
+
+# Gera Excel com uma aba por categoria
+def generate_excel_by_category(categorias_emails):
+    downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
+    timestamp = datetime.now().strftime("%d%m%Y")
+    filename = f"relatorio_emails_por_categoria_{timestamp}.xlsx"
+    file_path = os.path.join(downloads_path, filename)
+
+    with pd.ExcelWriter(file_path, engine='xlsxwriter') as writer:
+        for categoria, emails in categorias_emails.items():
+            nome_aba = limpar_nome_aba(categoria)
+            df = pd.DataFrame(emails)
+            df = df.sort_values('Data', ascending=False)
+            df.to_excel(writer, sheet_name=nome_aba, index=False)
+
+    print(f"\n✅ Excel gerado com abas por categoria: {file_path}")
+
+# Execução principal
+if __name__ == "__main__":
+    try:
+        categorias_emails = analyze_outlook_emails()
+        generate_excel_by_category(categorias_emails)
+    except Exception as e:
+        print(f"Ocorreu um erro geral: {str(e)}")
